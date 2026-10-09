@@ -1,32 +1,48 @@
-
 const BOT_NAME = "One Stop Wellness Hub";
 const WHEEL_URL = "https://sobtiganga5-png.github.io/one-stop-wheel/";
 const CONTACT_EMAIL = "sales@bridgepointtraders.com";
 
-async function telegram(token, method, data) {
-  const response = await fetch(
-    `https://api.telegram.org/bot${token}/${method}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data)
-    }
-  );
+const BOT_TOKEN = process.env.BOT_TOKEN;
 
-  return response.json();
+if (!BOT_TOKEN) {
+  console.error("Missing BOT_TOKEN environment variable.");
+  process.exit(1);
 }
 
-async function sendMessage(token, chatId, text, keyboard) {
+const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+async function telegram(method, data = {}) {
+  const response = await fetch(`${API}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data)
+  });
+
+  const result = await response.json();
+
+  if (!result.ok) {
+    console.error(`Telegram ${method} failed:`, result.description);
+  }
+
+  return result;
+}
+
+async function sendMessage(chatId, text, keyboard) {
   const data = { chat_id: chatId, text };
-  if (keyboard) data.reply_markup = keyboard;
-  return telegram(token, "sendMessage", data);
+
+  if (keyboard) {
+    data.reply_markup = keyboard;
+  }
+
+  return telegram("sendMessage", data);
 }
 
-async function sendWelcome(token, chatId) {
+async function sendWelcome(chatId) {
   return sendMessage(
-    token,
     chatId,
-    `👋 Welcome to ${BOT_NAME}!\n\nYour pharmaceutical and dermatology product supply contact.\n\nChoose an option below:`,
+    `👋 Welcome to ${BOT_NAME}!\n\n` +
+      "Your pharmaceutical and dermatology product supply contact.\n\n" +
+      "Choose an option below:",
     {
       inline_keyboard: [
         [{ text: "🎁 Spin the Wheel", web_app: { url: WHEEL_URL } }],
@@ -38,7 +54,7 @@ async function sendWelcome(token, chatId) {
   );
 }
 
-async function handleMessage(token, message) {
+async function handleMessage(message) {
   if (!message.chat || !message.text) return;
 
   const chatId = message.chat.id;
@@ -49,110 +65,125 @@ async function handleMessage(token, message) {
 
     if (payload.startsWith("claim_")) {
       await sendMessage(
-        token,
         chatId,
-        "🎉 OFFER CLAIM REQUEST\n\nReference: " +
-          payload.slice(6) +
+        "🎉 OFFER CLAIM REQUEST\n\n" +
+          "Reference: " + payload.slice(6) +
           "\n\nPlease contact our team to verify your offer.\n" +
           CONTACT_EMAIL
       );
       return;
     }
 
-    await sendWelcome(token, chatId);
+    await sendWelcome(chatId);
     return;
   }
 
   if (text === "/menu") {
-    await sendWelcome(token, chatId);
+    await sendWelcome(chatId);
     return;
   }
 
-  await sendMessage(token, chatId, "Please send /start to open the main menu.");
+  await sendMessage(
+    chatId,
+    "Please send /start to open the main menu."
+  );
 }
 
-async function handleCallback(token, callback) {
-  await telegram(token, "answerCallbackQuery", {
+async function handleCallback(callback) {
+  await telegram("answerCallbackQuery", {
     callback_query_id: callback.id
   });
 
   if (!callback.message) return;
 
   const chatId = callback.message.chat.id;
+
   const replies = {
     products:
       "🛍️ PRODUCT CATALOGUE\n\n" +
       "Tablets, capsules, injections, dermatology and skincare products.\n\n" +
       "Send your product requirements, quantity and destination country for a quotation.",
+
     contact:
-      "📩 CONTACT US\n\nEmail: " + CONTACT_EMAIL +
+      "📩 CONTACT US\n\n" +
+      "Email: " + CONTACT_EMAIL +
       "\n\nPlease include your product requirements and destination country.",
+
     about:
-      "ℹ️ ABOUT US\n\nOne Stop Wellness Hub provides pharmaceutical and dermatology product supply support.\n\n" +
+      "ℹ️ ABOUT US\n\n" +
+      "One Stop Wellness Hub provides pharmaceutical and dermatology product supply support.\n\n" +
       "Contact: " + CONTACT_EMAIL
   };
 
   if (callback.data === "menu") {
-    await sendWelcome(token, chatId);
+    await sendWelcome(chatId);
   } else if (replies[callback.data]) {
-    await sendMessage(token, chatId, replies[callback.data], {
-      inline_keyboard: [[
-        { text: "⬅️ Main Menu", callback_data: "menu" }
-      ]]
+    await sendMessage(chatId, replies[callback.data], {
+      inline_keyboard: [
+        [{ text: "⬅️ Main Menu", callback_data: "menu" }]
+      ]
     });
   }
 }
 
-export default {
-  async fetch(request, env) {
-    if (!env.BOT_TOKEN) {
-      return new Response("BOT_TOKEN is missing in Cloudflare Settings.", {
-        status: 500
-      });
-    }
+async function pollTelegram() {
+  let offset = 0;
 
-    const url = new URL(request.url);
+  console.log(`${BOT_NAME} is starting...`);
 
-    if (request.method === "GET" && url.pathname === "/setup") {
-      const result = await telegram(env.BOT_TOKEN, "setWebhook", {
-        url: url.origin + "/",
+  // Polling and webhook cannot be used at the same time.
+  const webhook = await telegram("deleteWebhook", {
+    drop_pending_updates: false
+  });
+
+  if (!webhook.ok) {
+    throw new Error("Could not remove Telegram webhook.");
+  }
+
+  const me = await telegram("getMe");
+
+  if (!me.ok) {
+    throw new Error("Telegram bot token is invalid.");
+  }
+
+  console.log(`Connected to @${me.result.username}`);
+
+  while (true) {
+    try {
+      const result = await telegram("getUpdates", {
+        offset,
+        timeout: 30,
         allowed_updates: ["message", "callback_query"]
       });
 
-      return Response.json(result);
-    }
+      if (!result.ok) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        continue;
+      }
 
-    if (request.method === "GET") {
-      return new Response(BOT_NAME + " Bot is running!");
-    }
+      for (const update of result.result) {
+        offset = update.update_id + 1;
 
-    if (request.method !== "POST") {
-      return new Response("Method not allowed", { status: 405 });
-    }
+        try {
+          if (update.message) {
+            await handleMessage(update.message);
+          }
 
-    let update;
-
-    try {
-      update = await request.json();
-    } catch {
-      return new Response("Invalid Telegram update JSON.", { status: 400 });
-    }
-
-    try {
-      if (update.message) {
-        const result = await handleMessage(env.BOT_TOKEN, update.message);
-        if (result && result.ok === false) {
-          console.error("Telegram sendMessage failed:", result);
+          if (update.callback_query) {
+            await handleCallback(update.callback_query);
+          }
+        } catch (error) {
+          console.error("Update processing error:", error);
         }
       }
-
-      if (update.callback_query) {
-        await handleCallback(env.BOT_TOKEN, update.callback_query);
-      }
     } catch (error) {
-      console.error("Telegram update processing failed:", error);
+      console.error("Polling error:", error);
+      await new Promise(resolve => setTimeout(resolve, 3000));
     }
-
-    return new Response("OK");
   }
-};
+}
+
+pollTelegram().catch(error => {
+  console.error("Bot startup failed:", error);
+  process.exit(1);
+});
