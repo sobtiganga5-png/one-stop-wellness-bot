@@ -3,6 +3,8 @@ const http = require("node:http");
 
 const BOT_NAME = "One Stop Wellness Hub";
 const WHEEL_URL = "https://sobtiganga5-png.github.io/one-stop-wheel/";
+const CATALOGUE_URL =
+  "https://docs.google.com/spreadsheets/d/1lDyik6O8-A4or25wWKdZPYIkzIQP8IcC_iGO_riBh5w/edit?gid=972572136#gid=972572136";
 const CONTACT_EMAIL = "sales@bridgepointtraders.com";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -32,10 +34,10 @@ async function telegram(method, data = {}) {
   return result;
 }
 
-async function sendMessage(chatId, text, keyboard) {
+async function sendMessage(chatId, text, replyMarkup) {
   const data = { chat_id: chatId, text };
 
-  if (keyboard) data.reply_markup = keyboard;
+  if (replyMarkup) data.reply_markup = replyMarkup;
 
   return telegram("sendMessage", data);
 }
@@ -98,29 +100,57 @@ async function handleCallback(callback) {
 
   const chatId = callback.message.chat.id;
 
-  const replies = {
-    products:
-      "🛍️ PRODUCT CATALOGUE\n\n" +
-      "Tablets, capsules, injections, dermatology and skincare products.\n\n" +
-      "Send your product requirements, quantity and destination country for a quotation.",
-    contact:
-      "📩 CONTACT US\n\n" +
-      "Email: " + CONTACT_EMAIL +
-      "\n\nPlease include your product requirements and destination country.",
-    about:
-      "ℹ️ ABOUT US\n\n" +
-      "One Stop Wellness Hub provides pharmaceutical and dermatology product supply support.\n\n" +
-      "Contact: " + CONTACT_EMAIL
-  };
-
   if (callback.data === "menu") {
     await sendWelcome(chatId);
-  } else if (replies[callback.data]) {
-    await sendMessage(chatId, replies[callback.data], {
-      inline_keyboard: [
-        [{ text: "⬅️ Main Menu", callback_data: "menu" }]
-      ]
-    });
+    return;
+  }
+
+  if (callback.data === "products") {
+    await sendMessage(
+      chatId,
+      "🛍️ LIVE PRODUCT CATALOGUE\n\n" +
+        "Browse our live Google Sheets catalogue using the button below.\n\n" +
+        "For a quotation, share your product requirements, quantity and destination country.",
+      {
+        inline_keyboard: [
+          [{ text: "📊 Open Live Catalogue", url: CATALOGUE_URL }],
+          [{ text: "📩 Request a Quotation", callback_data: "contact" }],
+          [{ text: "⬅️ Main Menu", callback_data: "menu" }]
+        ]
+      }
+    );
+    return;
+  }
+
+  if (callback.data === "contact") {
+    await sendMessage(
+      chatId,
+      "📩 CONTACT US\n\n" +
+        "Email: " + CONTACT_EMAIL +
+        "\n\nPlease include your product requirements, quantities and destination country.",
+      {
+        inline_keyboard: [
+          [{ text: "⬅️ Main Menu", callback_data: "menu" }]
+        ]
+      }
+    );
+    return;
+  }
+
+  if (callback.data === "about") {
+    await sendMessage(
+      chatId,
+      "ℹ️ ABOUT US\n\n" +
+        "One Stop Wellness Hub connects customers with pharmaceutical and dermatology product supply enquiries.\n\n" +
+        "For product availability and quotations, contact:\n" +
+        CONTACT_EMAIL,
+      {
+        inline_keyboard: [
+          [{ text: "📊 Browse Catalogue", callback_data: "products" }],
+          [{ text: "⬅️ Main Menu", callback_data: "menu" }]
+        ]
+      }
+    );
   }
 }
 
@@ -138,7 +168,7 @@ async function processUpdate(update) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end(`${BOT_NAME} is running.`);
@@ -150,18 +180,24 @@ const server = http.createServer(async (req, res) => {
 
     req.on("data", chunk => {
       body += chunk;
+      if (body.length > 1_000_000) req.destroy();
     });
 
     req.on("end", () => {
+      let update;
+
+      try {
+        update = JSON.parse(body);
+      } catch {
+        res.writeHead(400);
+        res.end("Invalid JSON");
+        return;
+      }
+
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("OK");
 
-      try {
-        const update = JSON.parse(body);
-        void processUpdate(update);
-      } catch (error) {
-        console.error("Invalid Telegram update:", error);
-      }
+      void processUpdate(update);
     });
 
     return;
