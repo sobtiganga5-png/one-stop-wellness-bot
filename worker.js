@@ -1,8 +1,13 @@
+
+const http = require("node:http");
+
 const BOT_NAME = "One Stop Wellness Hub";
 const WHEEL_URL = "https://sobtiganga5-png.github.io/one-stop-wheel/";
 const CONTACT_EMAIL = "sales@bridgepointtraders.com";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const PORT = process.env.PORT || 3000;
+const BASE_URL = process.env.RENDER_EXTERNAL_URL;
 
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN environment variable.");
@@ -30,9 +35,7 @@ async function telegram(method, data = {}) {
 async function sendMessage(chatId, text, keyboard) {
   const data = { chat_id: chatId, text };
 
-  if (keyboard) {
-    data.reply_markup = keyboard;
-  }
+  if (keyboard) data.reply_markup = keyboard;
 
   return telegram("sendMessage", data);
 }
@@ -42,7 +45,7 @@ async function sendWelcome(chatId) {
     chatId,
     `👋 Welcome to ${BOT_NAME}!\n\n` +
       "Your pharmaceutical and dermatology product supply contact.\n\n" +
-      "Choose an option below:",
+      "Please choose an option below:",
     {
       inline_keyboard: [
         [{ text: "🎁 Spin the Wheel", web_app: { url: WHEEL_URL } }],
@@ -83,10 +86,7 @@ async function handleMessage(message) {
     return;
   }
 
-  await sendMessage(
-    chatId,
-    "Please send /start to open the main menu."
-  );
+  await sendMessage(chatId, "Please send /start to open the main menu.");
 }
 
 async function handleCallback(callback) {
@@ -103,12 +103,10 @@ async function handleCallback(callback) {
       "🛍️ PRODUCT CATALOGUE\n\n" +
       "Tablets, capsules, injections, dermatology and skincare products.\n\n" +
       "Send your product requirements, quantity and destination country for a quotation.",
-
     contact:
       "📩 CONTACT US\n\n" +
       "Email: " + CONTACT_EMAIL +
       "\n\nPlease include your product requirements and destination country.",
-
     about:
       "ℹ️ ABOUT US\n\n" +
       "One Stop Wellness Hub provides pharmaceutical and dermatology product supply support.\n\n" +
@@ -126,64 +124,69 @@ async function handleCallback(callback) {
   }
 }
 
-async function pollTelegram() {
-  let offset = 0;
-
-  console.log(`${BOT_NAME} is starting...`);
-
-  // Polling and webhook cannot be used at the same time.
-  const webhook = await telegram("deleteWebhook", {
-    drop_pending_updates: false
-  });
-
-  if (!webhook.ok) {
-    throw new Error("Could not remove Telegram webhook.");
-  }
-
-  const me = await telegram("getMe");
-
-  if (!me.ok) {
-    throw new Error("Telegram bot token is invalid.");
-  }
-
-  console.log(`Connected to @${me.result.username}`);
-
-  while (true) {
-    try {
-      const result = await telegram("getUpdates", {
-        offset,
-        timeout: 30,
-        allowed_updates: ["message", "callback_query"]
-      });
-
-      if (!result.ok) {
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        continue;
-      }
-
-      for (const update of result.result) {
-        offset = update.update_id + 1;
-
-        try {
-          if (update.message) {
-            await handleMessage(update.message);
-          }
-
-          if (update.callback_query) {
-            await handleCallback(update.callback_query);
-          }
-        } catch (error) {
-          console.error("Update processing error:", error);
-        }
-      }
-    } catch (error) {
-      console.error("Polling error:", error);
-      await new Promise(resolve => setTimeout(resolve, 3000));
+async function processUpdate(update) {
+  try {
+    if (update.message) {
+      await handleMessage(update.message);
     }
+
+    if (update.callback_query) {
+      await handleCallback(update.callback_query);
+    }
+  } catch (error) {
+    console.error("Update processing error:", error);
   }
 }
 
-pollTelegram().catch(error => {
-  console.error("Bot startup failed:", error);
-  process.exit(1);
+const server = http.createServer(async (req, res) => {
+  if (req.method === "GET" && req.url === "/") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end(`${BOT_NAME} is running.`);
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/telegram-webhook") {
+    let body = "";
+
+    req.on("data", chunk => {
+      body += chunk;
+    });
+
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("OK");
+
+      try {
+        const update = JSON.parse(body);
+        void processUpdate(update);
+      } catch (error) {
+        console.error("Invalid Telegram update:", error);
+      }
+    });
+
+    return;
+  }
+
+  res.writeHead(404);
+  res.end("Not found");
+});
+
+server.listen(PORT, "0.0.0.0", async () => {
+  console.log(`${BOT_NAME} server started on port ${PORT}`);
+
+  if (!BASE_URL) {
+    console.error("Missing RENDER_EXTERNAL_URL environment variable.");
+    return;
+  }
+
+  const result = await telegram("setWebhook", {
+    url: `${BASE_URL.replace(/\/$/, "")}/telegram-webhook`,
+    allowed_updates: ["message", "callback_query"]
+  });
+
+  if (result.ok) {
+    console.log("Telegram webhook successfully configured.");
+  } else {
+    console.error("Webhook setup failed:", result.description);
+  }
 });
