@@ -3,477 +3,348 @@ const http = require("node:http");
 
 const BOT_NAME = "One Stop Wellness Hub";
 const WHEEL_URL = "https://sobtiganga5-png.github.io/one-stop-wheel/";
-const SHEET_ID = "1lDyik6O8-A4or25wWKdZPYIkzIQP8IcC_iGO_riBh5w";
-const SHEET_GID = "1057980873";
-const CATALOGUE_URL =
-  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit?gid=${SHEET_GID}#gid=${SHEET_GID}`;
-const CSV_URL =
-  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
+const CATALOGUE_FEED_URL =
+  "https://script.google.com/macros/s/AKfycbx0OdVM3RAC2yv_AviMihqqxVKQspzTYmicE_MrpKoovMejdIgC8wgT2oXEw9aIY8yd/exec";
 const CONTACT_EMAIL = "sales@bridgepointtraders.com";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.RENDER_EXTERNAL_URL;
 
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN environment variable.");
   process.exit(1);
 }
 
-const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const sessions = new Map();
 
 async function telegram(method, data = {}) {
-  const response = await fetch(`${API}/${method}`, {
+  const response = await fetch(`${TELEGRAM_API}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data)
   });
 
   const result = await response.json();
-  if (!result.ok) {
-    console.error(`Telegram ${method} failed:`, result.description);
+
+  if (!response.ok || !result.ok) {
+    throw new Error(result.description || `Telegram HTTP ${response.status}`);
   }
-  return result;
+
+  return result.result;
 }
 
 async function sendMessage(chatId, text, replyMarkup) {
-  const data = { chat_id: chatId, text };
+  const data = {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true
+  };
+
   if (replyMarkup) data.reply_markup = replyMarkup;
+
   return telegram("sendMessage", data);
 }
 
-async function sendWelcome(chatId) {
-  sessions.delete(String(chatId));
-
-  return sendMessage(
-    chatId,
-    `👋 Welcome to ${BOT_NAME}!\n\n` +
-      "Your pharmaceutical and dermatology product supply contact.\n\n" +
-      "Please choose an option below:",
-    {
-      inline_keyboard: [
-        [{ text: "🎁 Spin the Wheel", web_app: { url: WHEEL_URL } }],
-        [{ text: "🛍️ Browse Products", callback_data: "products" }],
-        [{ text: "🧾 Request a Quotation", callback_data: "quotation" }],
-        [{ text: "📩 Contact Us", callback_data: "contact" }],
-        [{ text: "ℹ️ About Us", callback_data: "about" }]
-      ]
-    }
-  );
+async function answerCallback(callbackId, text = "") {
+  try {
+    await telegram("answerCallbackQuery", {
+      callback_query_id: callbackId,
+      text
+    });
+  } catch (error) {
+    console.error("Callback response error:", error.message);
+  }
 }
 
-// Parse CSV while preserving commas inside quoted cells.
-function parseCSV(text) {
-  const rows = [];
-  let row = [];
-  let cell = "";
-  let quoted = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-
-    if (char === '"') {
-      if (quoted && text[i + 1] === '"') {
-        cell += '"';
-        i++;
-      } else {
-        quoted = !quoted;
-      }
-    } else if (char === "," && !quoted) {
-      row.push(cell.trim());
-      cell = "";
-    } else if ((char === "\n" || char === "\r") && !quoted) {
-      if (char === "\r" && text[i + 1] === "\n") i++;
-      row.push(cell.trim());
-      if (row.some(value => value !== "")) rows.push(row);
-      row = [];
-      cell = "";
-    } else {
-      cell += char;
-    }
-  }
-
-  row.push(cell.trim());
-  if (row.some(value => value !== "")) rows.push(row);
-  return rows;
-}
-
-async function getCatalogue() {
-  const response = await fetch(CSV_URL, {
-    headers: { "Cache-Control": "no-cache" }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Google Sheets returned HTTP ${response.status}`);
-  }
-
-  const csv = await response.text();
-
-  if (csv.trim().startsWith("<!DOCTYPE html") ||
-      csv.trim().startsWith("<html")) {
-    throw new Error("Google Sheet did not return CSV. Check link access.");
-  }
-
-  const rows = parseCSV(csv);
-  const headerIndex = rows.findIndex(row =>
-    row.some(cell => /PRODUCT NAME/i.test(cell)) &&
-    row.some(cell => /PACKING/i.test(cell)) &&
-    row.some(cell => /RATE\s*\(USD\)/i.test(cell))
-  );
-
-  if (headerIndex < 0) {
-    throw new Error("Could not find catalogue column headings.");
-  }
-
-  const headers = rows[headerIndex].map(v => v.toUpperCase());
-  const column = pattern => headers.findIndex(h => pattern.test(h));
-
-  const productCol = column(/PRODUCT NAME/);
-  const saltCol = column(/SALT|CONTENT/);
-  const packingCol = column(/PACKING/);
-  const brandCol = column(/BRAND/);
-  const priceCol = column(/RATE\s*\(USD\)/);
-
-  return rows.slice(headerIndex + 1)
-    .map(row => ({
-      product: row[productCol] || "",
-      salt: saltCol >= 0 ? row[saltCol] || "" : "",
-      packing: row[packingCol] || "",
-      brand: brandCol >= 0 ? row[brandCol] || "" : "",
-      priceText: row[priceCol] || ""
-    }))
-    .filter(item => item.product && item.packing);
-}
-
-function parsePrice(value) {
-  const cleaned = String(value).replace(/[$,\s]/g, "");
-  if (!cleaned || !/^\d+(\.\d+)?$/.test(cleaned)) return null;
-  const price = Number(cleaned);
-  return Number.isFinite(price) && price > 0 ? price : null;
-}
-
-function mainMenuButton() {
+function mainMenu() {
   return {
     inline_keyboard: [
-      [{ text: "⬅️ Main Menu", callback_data: "menu" }]
+      [
+        {
+          text: "🎁 Spin the Wheel",
+          web_app: { url: WHEEL_URL }
+        }
+      ],
+      [
+        { text: "🔎 Browse Products", callback_data: "browse" },
+        { text: "📩 Contact Us", callback_data: "contact" }
+      ],
+      [
+        { text: "ℹ️ About Us", callback_data: "about" }
+      ]
     ]
   };
 }
 
-async function beginQuotation(chatId) {
-  sessions.set(String(chatId), { step: "search" });
-  await sendMessage(
-    chatId,
-    "🧾 REQUEST A QUOTATION\n\n" +
-      "Type the product name, brand, or salt/content name you need.\n\n" +
-      "Example: OSEPTIN or SEMAGLUTIDE\n\n" +
-      "I'll search the live catalogue for matching products.",
-    {
-      inline_keyboard: [
-        [{ text: "❌ Cancel", callback_data: "qcancel" }],
-        [{ text: "⬅️ Main Menu", callback_data: "menu" }]
-      ]
-    }
+function welcomeMessage() {
+  return (
+    `Welcome to ${BOT_NAME}! 👋\n\n` +
+    "Explore our public product catalogue, search by product name " +
+    "or brand, and request a quotation.\n\n" +
+    "Choose an option below to get started."
   );
+}
+
+async function getCatalogue() {
+  const response = await fetch(CATALOGUE_FEED_URL, {
+    headers: { "Cache-Control": "no-cache" }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Catalogue feed HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  if (!data.success || !Array.isArray(data.products)) {
+    throw new Error(data.error || "Invalid catalogue feed response");
+  }
+
+  return data.products;
+}
+
+function normalize(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function searchMatches(products, query) {
+  const terms = normalize(query).split(/\s+/).filter(Boolean);
+
+  if (!terms.length) return [];
+
+  return products.filter(product => {
+    const searchable = normalize([
+      product.product,
+      product.salt,
+      product.brand,
+      product.packing,
+      product.category
+    ].join(" "));
+
+    return terms.every(term => searchable.includes(term));
+  });
+}
+
+function parsePrice(priceText) {
+  const cleaned = String(priceText || "")
+    .replace(/,/g, "")
+    .replace(/[^0-9.]/g, "");
+
+  const price = Number(cleaned);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function formatMoney(amount) {
+  return "$" + amount.toFixed(2);
 }
 
 async function searchProducts(chatId, query) {
-  await sendMessage(chatId, "🔎 Searching your live catalogue...");
+  await sendMessage(chatId, "🔎 Searching your live public catalogue...");
 
-  let catalogue;
   try {
-    catalogue = await getCatalogue();
-  } catch (error) {
-    console.error("Catalogue error:", error);
-    sessions.delete(String(chatId));
+    const products = await getCatalogue();
+    const matches = searchMatches(products, query).slice(0, 10);
+
+    if (!matches.length) {
+      await sendMessage(
+        chatId,
+        `No matching products found for: ${query}\n\n` +
+        "Try the product name, brand name, or strength. " +
+        "You can also contact us for assistance.",
+        {
+          inline_keyboard: [
+            [{ text: "📩 Contact Us", callback_data: "contact" }],
+            [{ text: "🏠 Main Menu", callback_data: "home" }]
+          ]
+        }
+      );
+      return;
+    }
+
+    const session = sessions.get(chatId) || {};
+    session.searchResults = matches;
+    session.stage = null;
+    sessions.set(chatId, session);
+
     await sendMessage(
       chatId,
-      "Sorry, I couldn't read the live catalogue just now.\n\n" +
-        "Please try again later or contact " + CONTACT_EMAIL,
-      mainMenuButton()
+      `Found ${matches.length} matching product(s).\n\n` +
+      "Select a product below to view its details and request a quotation."
     );
-    return;
-  }
 
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = catalogue.filter(item => {
-    const searchable =
-      `${item.product} ${item.salt} ${item.brand} ${item.packing}`.toLowerCase();
-    return terms.every(term => searchable.includes(term));
-  }).slice(0, 10);
+    for (let i = 0; i < matches.length; i++) {
+      const product = matches[i];
+      const price = parsePrice(product.priceText);
 
-  if (!matches.length) {
-    await sendMessage(
-      chatId,
-      "No matching products found. Try another product name or salt/content name.",
-      {
+      const details = [
+        `📦 ${product.product}`,
+        product.salt ? `Content: ${product.salt}` : null,
+        product.brand ? `Brand: ${product.brand}` : null,
+        product.packing ? `Packing: ${product.packing}` : null,
+        `Category: ${product.category}`,
+        price !== null
+          ? `Catalogue price: ${formatMoney(price)} per listed packing unit`
+          : `Catalogue price: ${product.priceText || "Please enquire"}`
+      ].filter(Boolean).join("\n");
+
+      await sendMessage(chatId, details, {
         inline_keyboard: [
-          [{ text: "🔎 Search Again", callback_data: "quotation" }],
-          [{ text: "⬅️ Main Menu", callback_data: "menu" }]
+          [{
+            text: "🧾 Request Quotation",
+            callback_data: `quote:${i}`
+          }]
         ]
-      }
+      });
+    }
+
+    await sendMessage(chatId, "What would you like to do next?", mainMenu());
+  } catch (error) {
+    console.error("Catalogue search error:", error.message);
+
+    await sendMessage(
+      chatId,
+      "Sorry, I couldn't access the catalogue right now. " +
+      "Please try again shortly or contact " + CONTACT_EMAIL + ".",
+      mainMenu()
     );
-    sessions.delete(String(chatId));
+  }
+}
+
+async function startQuotation(chatId, index) {
+  const session = sessions.get(chatId);
+  const product = session?.searchResults?.[index];
+
+  if (!product) {
+    await sendMessage(
+      chatId,
+      "That product selection has expired. Please search again.",
+      mainMenu()
+    );
     return;
   }
 
-  sessions.set(String(chatId), {
-    step: "select",
-    matches
-  });
-
-  const buttons = matches.map((item, index) => {
-    const price = parsePrice(item.priceText);
-    const priceLabel = price === null ? "Price unavailable" : `$${price.toFixed(2)}`;
-    const label =
-      `${item.product} | ${item.packing} | ${priceLabel}`;
-    return [{
-      text: label.slice(0, 60),
-      callback_data: `qprod:${index}`
-    }];
-  });
-
-  buttons.push([{ text: "❌ Cancel", callback_data: "qcancel" }]);
+  session.selectedProduct = product;
+  session.stage = "quantity";
+  session.quantity = null;
+  session.country = null;
+  sessions.set(chatId, session);
 
   await sendMessage(
     chatId,
-    "✅ MATCHING CATALOGUE PRODUCTS\n\n" +
-      "Select the exact product and packing below.\n" +
-      "Prices are in USD and use the catalogue's packing unit.",
-    { inline_keyboard: buttons }
+    `🧾 Quotation Request\n\n` +
+    `Product: ${product.product}\n` +
+    `Packing: ${product.packing || "As listed"}\n` +
+    `Catalogue price: ${product.priceText || "Please enquire"}\n\n` +
+    "Enter the quantity of listed packing units you require.\n\n" +
+    "Example: 10"
   );
 }
 
-async function handleMessage(message) {
-  if (!message.chat || !message.text) return;
+async function handleQuotationMessage(chatId, text) {
+  const session = sessions.get(chatId);
 
-  const chatId = message.chat.id;
-  const key = String(chatId);
-  const text = message.text.trim();
+  if (!session || !session.stage) return false;
 
-  if (text.startsWith("/start")) {
-    const payload = text.split(/\s+/)[1] || "";
-    sessions.delete(key);
+  if (session.stage === "quantity") {
+    const quantity = Number(String(text).trim());
 
-    if (payload.startsWith("claim_")) {
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000000) {
       await sendMessage(
         chatId,
-        "🎉 OFFER CLAIM REQUEST\n\n" +
-          "Reference: " + payload.slice(6) +
-          "\n\nPlease contact our team to verify your offer.\n" +
-          CONTACT_EMAIL,
-        mainMenuButton()
+        "Please enter a valid whole-number quantity, such as 10."
       );
-      return;
-    }
-
-    await sendWelcome(chatId);
-    return;
-  }
-
-  if (text === "/menu") {
-    await sendWelcome(chatId);
-    return;
-  }
-
-  if (text === "/quote") {
-    await beginQuotation(chatId);
-    return;
-  }
-
-  const session = sessions.get(key);
-
-  if (!session) {
-    await sendMessage(
-      chatId,
-      "Please choose an option from the menu or type /start.",
-      mainMenuButton()
-    );
-    return;
-  }
-
-  if (session.step === "search") {
-    if (text.length < 2) {
-      await sendMessage(chatId, "Please enter at least 2 characters.");
-      return;
-    }
-    await searchProducts(chatId, text);
-    return;
-  }
-
-  if (session.step === "quantity") {
-    const quantity = Number(text);
-
-    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000) {
-      await sendMessage(
-        chatId,
-        "Please enter a whole-number quantity of packing units, such as 2 or 10."
-      );
-      return;
+      return true;
     }
 
     session.quantity = quantity;
-    session.step = "country";
-    sessions.set(key, session);
+    session.stage = "country";
+    sessions.set(chatId, session);
 
     await sendMessage(
       chatId,
-      "🌍 Which country should the order be delivered to?\n\n" +
-        "Please type the destination country."
+      "🌍 Which country should the order be shipped to?\n\n" +
+      "Enter the destination country."
     );
-    return;
+    return true;
   }
 
-  if (session.step === "country") {
-    const country = text.slice(0, 80);
-    const item = session.product;
-    const price = parsePrice(item.priceText);
+  if (session.stage === "country") {
+    const country = String(text).trim();
 
-    if (price === null) {
-      sessions.delete(key);
-      await sendMessage(
-        chatId,
-        "This product doesn't have a valid USD price in the catalogue, so I can't calculate an automatic quotation.\n\n" +
-          "Please contact " + CONTACT_EMAIL,
-        mainMenuButton()
-      );
-      return;
+    if (country.length < 2 || country.length > 100) {
+      await sendMessage(chatId, "Please enter a valid destination country.");
+      return true;
     }
 
-    const subtotal = price * session.quantity;
-    const quoteId = `Q${Date.now().toString().slice(-9)}`;
+    session.country = country;
+    session.stage = "confirm";
+    sessions.set(chatId, session);
 
-    const quotation =
-      `🧾 QUOTATION ${quoteId}\n\n` +
-      `Product: ${item.product}\n` +
-      (item.salt ? `Salt / Content: ${item.salt}\n` : "") +
-      (item.brand ? `Brand: ${item.brand}\n` : "") +
-      `Packing: ${item.packing}\n` +
-      `Price per packing unit: $${price.toFixed(2)}\n` +
+    const product = session.selectedProduct;
+    const unitPrice = parsePrice(product.priceText);
+    const total = unitPrice !== null
+      ? formatMoney(unitPrice * session.quantity)
+      : "To be confirmed";
+
+    const summary =
+      "🧾 YOUR QUOTATION REQUEST\n\n" +
+      `Product: ${product.product}\n` +
+      `Content: ${product.salt || "As listed"}\n` +
+      `Brand: ${product.brand || "As listed"}\n` +
+      `Packing per unit: ${product.packing || "As listed"}\n` +
       `Quantity: ${session.quantity} packing unit(s)\n` +
-      `Product subtotal: $${subtotal.toFixed(2)} USD\n\n` +
       `Destination: ${country}\n` +
-      `Shipping: Not included; confirm separately.\n\n` +
-      "This is an automated product quotation based on the live catalogue. " +
-      "Final availability, shipping and any applicable charges must be confirmed by our team.\n\n" +
-      `Contact: ${CONTACT_EMAIL}`;
+      `Catalogue unit price: ${product.priceText || "To be confirmed"}\n` +
+      `Estimated product subtotal: ${total}\n\n` +
+      "This is an estimate based on the listed catalogue price. " +
+      "Shipping, applicable taxes, export eligibility, availability, " +
+      "and other charges are not included. Final pricing and shipment " +
+      "are subject to confirmation and applicable laws.";
 
-    sessions.delete(key);
-    await sendMessage(chatId, quotation, {
+    session.quoteSummary = summary;
+    sessions.set(chatId, session);
+
+    await sendMessage(chatId, summary, {
       inline_keyboard: [
-        [{ text: "🧾 Request Another Quote", callback_data: "quotation" }],
-        [{ text: "📩 Contact Us", callback_data: "contact" }],
-        [{ text: "⬅️ Main Menu", callback_data: "menu" }]
+        [{ text: "✅ Submit Request", callback_data: "submit_quote" }],
+        [{ text: "❌ Cancel", callback_data: "cancel_quote" }]
       ]
     });
-    return;
+
+    return true;
   }
 
-  await sendMessage(chatId, "Please select an option or type /start.");
+  return false;
 }
 
 async function handleCallback(callback) {
-  await telegram("answerCallbackQuery", {
-    callback_query_id: callback.id
-  });
-
-  if (!callback.message) return;
-
-  const chatId = callback.message.chat.id;
-  const key = String(chatId);
+  const chatId = callback.message?.chat?.id;
   const data = callback.data || "";
 
-  if (data === "menu") {
-    await sendWelcome(chatId);
+  await answerCallback(callback.id);
+
+  if (!chatId) return;
+
+  if (data === "home") {
+    const session = sessions.get(chatId);
+    if (session) session.stage = null;
+    await sendMessage(chatId, welcomeMessage(), mainMenu());
     return;
   }
 
-  if (data === "qcancel") {
-    sessions.delete(key);
-    await sendMessage(chatId, "Quotation cancelled.", mainMenuButton());
-    return;
-  }
-
-  if (data === "quotation") {
-    await beginQuotation(chatId);
-    return;
-  }
-
-  if (data.startsWith("qprod:")) {
-    const session = sessions.get(key);
-    const index = Number(data.slice(6));
-
-    if (!session || session.step !== "select" ||
-        !Number.isInteger(index) || !session.matches[index]) {
-      await sendMessage(
-        chatId,
-        "That selection has expired. Please start your quotation again.",
-        {
-          inline_keyboard: [
-            [{ text: "🧾 Start Quotation", callback_data: "quotation" }]
-          ]
-        }
-      );
-      return;
-    }
-
-    const item = session.matches[index];
-    const price = parsePrice(item.priceText);
-
-    if (price === null) {
-      await sendMessage(
-        chatId,
-        `⚠️ ${item.product}\n\n` +
-          `Packing: ${item.packing}\n` +
-          "A valid USD price is not listed for this product. Please contact our team for a quotation.\n" +
-          CONTACT_EMAIL,
-        {
-          inline_keyboard: [
-            [{ text: "🔎 Search Another Product", callback_data: "quotation" }],
-            [{ text: "⬅️ Main Menu", callback_data: "menu" }]
-          ]
-        }
-      );
-      sessions.delete(key);
-      return;
-    }
-
-    session.product = item;
-    session.step = "quantity";
-    sessions.set(key, session);
+  if (data === "browse") {
+    const session = sessions.get(chatId) || {};
+    session.stage = "search";
+    sessions.set(chatId, session);
 
     await sendMessage(
       chatId,
-      `✅ PRODUCT SELECTED\n\n` +
-        `Product: ${item.product}\n` +
-        (item.salt ? `Salt / Content: ${item.salt}\n` : "") +
-        (item.brand ? `Brand: ${item.brand}\n` : "") +
-        `Packing: ${item.packing}\n` +
-        `Price per packing unit: $${price.toFixed(2)} USD\n\n` +
-        "Enter the quantity in the packing units shown above.\n" +
-        "For example, enter 2 for 2 pens or 2 packs.",
-      {
-        inline_keyboard: [
-          [{ text: "❌ Cancel", callback_data: "qcancel" }]
-        ]
-      }
-    );
-    return;
-  }
-
-  if (data === "products") {
-    await sendMessage(
-      chatId,
-      "🛍️ LIVE PRODUCT CATALOGUE\n\n" +
-        "Browse the live Google Sheets catalogue or request a quotation directly here.",
-      {
-        inline_keyboard: [
-          [{ text: "📊 Open Live Catalogue", url: CATALOGUE_URL }],
-          [{ text: "🧾 Request a Quotation", callback_data: "quotation" }],
-          [{ text: "⬅️ Main Menu", callback_data: "menu" }]
-        ]
-      }
+      "🔎 Enter the product name, brand, or strength you want to find.\n\n" +
+      "Example: EXTRA SUPER AVANA"
     );
     return;
   }
@@ -481,10 +352,11 @@ async function handleCallback(callback) {
   if (data === "contact") {
     await sendMessage(
       chatId,
-      "📩 CONTACT US\n\n" +
-        "Email: " + CONTACT_EMAIL +
-        "\n\nPlease include your product requirements, quantities and destination country.",
-      mainMenuButton()
+      "📩 Contact Us\n\n" +
+      "Bridge Point Traders\n" +
+      `Email: ${CONTACT_EMAIL}\n\n` +
+      "Send us your product requirements for assistance.",
+      mainMenu()
     );
     return;
   }
@@ -492,82 +364,151 @@ async function handleCallback(callback) {
   if (data === "about") {
     await sendMessage(
       chatId,
-      "ℹ️ ABOUT US\n\n" +
-        "One Stop Wellness Hub connects customers with pharmaceutical and dermatology product supply enquiries.\n\n" +
-        "For product availability and quotations, contact:\n" +
-        CONTACT_EMAIL,
-      {
-        inline_keyboard: [
-          [{ text: "📊 Browse Catalogue", callback_data: "products" }],
-          [{ text: "🧾 Request a Quotation", callback_data: "quotation" }],
-          [{ text: "⬅️ Main Menu", callback_data: "menu" }]
-        ]
-      }
+      "ℹ️ About Us\n\n" +
+      "Bridge Point Traders is a pharmaceutical trading and export business " +
+      "based in India. Product availability, export eligibility, and " +
+      "shipping depend on the destination country's applicable requirements.\n\n" +
+      `Contact: ${CONTACT_EMAIL}`,
+      mainMenu()
     );
+    return;
+  }
+
+  if (data.startsWith("quote:")) {
+    const index = Number(data.split(":")[1]);
+
+    if (!Number.isInteger(index) || index < 0) {
+      await sendMessage(chatId, "Invalid selection. Please search again.");
+      return;
+    }
+
+    await startQuotation(chatId, index);
+    return;
+  }
+
+  if (data === "submit_quote") {
+    const session = sessions.get(chatId);
+
+    if (!session?.quoteSummary || !session.selectedProduct) {
+      await sendMessage(
+        chatId,
+        "Your quotation request has expired. Please search again.",
+        mainMenu()
+      );
+      return;
+    }
+
+    session.stage = null;
+    sessions.set(chatId, session);
+
+    await sendMessage(
+      chatId,
+      "✅ Your quotation request has been recorded in this chat.\n\n" +
+      "To obtain a confirmed quotation, email your requirements to " +
+      `${CONTACT_EMAIL}.\n\n` +
+      "Please include your destination country and any additional requirements.",
+      mainMenu()
+    );
+    return;
+  }
+
+  if (data === "cancel_quote") {
+    const session = sessions.get(chatId);
+    if (session) session.stage = null;
+
+    await sendMessage(chatId, "Quotation request cancelled.", mainMenu());
   }
 }
 
-async function processUpdate(update) {
-  try {
-    if (update.message) await handleMessage(update.message);
-    if (update.callback_query) await handleCallback(update.callback_query);
-  } catch (error) {
-    console.error("Update processing error:", error);
+async function handleMessage(message) {
+  if (!message?.chat?.id || !message.text) return;
+
+  const chatId = message.chat.id;
+  const text = message.text.trim();
+
+  if (text === "/start" || text === "/menu") {
+    sessions.delete(chatId);
+    await sendMessage(chatId, welcomeMessage(), mainMenu());
+    return;
   }
+
+  if (text === "/help") {
+    await sendMessage(
+      chatId,
+      "Use /start to open the menu.\n" +
+      "Use Browse Products to search the public catalogue.\n" +
+      "You can also type a product name directly.",
+      mainMenu()
+    );
+    return;
+  }
+
+  const session = sessions.get(chatId);
+
+  if (session?.stage === "quantity" || session?.stage === "country") {
+    const handled = await handleQuotationMessage(chatId, text);
+    if (handled) return;
+  }
+
+  if (session?.stage === "search") {
+    session.stage = null;
+    sessions.set(chatId, session);
+    await searchProducts(chatId, text);
+    return;
+  }
+
+  if (text.startsWith("/")) {
+    await sendMessage(chatId, "Choose an option from the menu.", mainMenu());
+    return;
+  }
+
+  await searchProducts(chatId, text);
 }
 
-const server = http.createServer((req, res) => {
-  if (req.method === "GET" && req.url === "/") {
+const server = http.createServer(async (req, res) => {
+  if (req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end(`${BOT_NAME} is running.`);
     return;
   }
 
-  if (req.method === "POST" && req.url === "/telegram-webhook") {
-    let body = "";
-
-    req.on("data", chunk => {
-      body += chunk;
-      if (body.length > 1_000_000) req.destroy();
-    });
-
-    req.on("end", () => {
-      let update;
-      try {
-        update = JSON.parse(body);
-      } catch {
-        res.writeHead(400);
-        res.end("Invalid JSON");
-        return;
-      }
-
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("OK");
-      void processUpdate(update);
-    });
+  if (req.method !== "POST") {
+    res.writeHead(405);
+    res.end("Method not allowed");
     return;
   }
 
-  res.writeHead(404);
-  res.end("Not found");
-});
+  let body = "";
 
-server.listen(PORT, "0.0.0.0", async () => {
-  console.log(`${BOT_NAME} server started on port ${PORT}`);
-
-  if (!BASE_URL) {
-    console.error("Missing RENDER_EXTERNAL_URL environment variable.");
-    return;
-  }
-
-  const result = await telegram("setWebhook", {
-    url: `${BASE_URL.replace(/\/$/, "")}/telegram-webhook`,
-    allowed_updates: ["message", "callback_query"]
+  req.on("data", chunk => {
+    body += chunk;
+    if (body.length > 1_000_000) req.destroy();
   });
 
-  if (result.ok) {
-    console.log("Telegram webhook successfully configured.");
-  } else {
-    console.error("Webhook setup failed:", result.description);
-  }
+  req.on("end", async () => {
+    try {
+      const update = JSON.parse(body || "{}");
+
+      // Respond to Telegram promptly; process the update afterward.
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("OK");
+
+      if (update.callback_query) {
+        await handleCallback(update.callback_query);
+      } else if (update.message) {
+        await handleMessage(update.message);
+      }
+    } catch (error) {
+      console.error("Webhook processing error:", error.message);
+
+      if (!res.writableEnded) {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("OK");
+      }
+    }
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`${BOT_NAME} listening on port ${PORT}`);
 });
