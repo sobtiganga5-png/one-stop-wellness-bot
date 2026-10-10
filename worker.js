@@ -4,8 +4,7 @@ const http = require("node:http");
 // ==================== CONFIGURATION ====================
 
 const BOT_NAME = "One Stop Wellness Hub";
-const WHEEL_URL = "https://sobtiganga5-png.github.io/one-stop-wheel/";
-
+const CATALOGUE_URL = "https://docs.google.com/spreadsheets/d/1lDyik6O8-A4or25wWKdZPYIkzIQP8IcC_iGO_riBh5w/edit";
 const CATALOGUE_FEED_URL =
   "https://script.google.com/macros/s/AKfycbx0OdVM3RAC2yv_AviMihqqxVKQspzTYmicE_MrpKoovMejdIgC8wgT2oXEw9aIY8yd/exec";
 
