@@ -1,13 +1,18 @@
 
 const http = require("node:http");
 
+// ==================== CONFIGURATION ====================
+
 const BOT_NAME = "One Stop Wellness Hub";
 const WHEEL_URL = "https://sobtiganga5-png.github.io/one-stop-wheel/";
+
 const CATALOGUE_FEED_URL =
   "https://script.google.com/macros/s/AKfycbx0OdVM3RAC2yv_AviMihqqxVKQspzTYmicE_MrpKoovMejdIgC8wgT2oXEw9aIY8yd/exec";
+
 const CONTACT_EMAIL = "sales@bridgepointtraders.com";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || "";
 const PORT = process.env.PORT || 3000;
 
 if (!BOT_TOKEN) {
@@ -17,6 +22,8 @@ if (!BOT_TOKEN) {
 
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const sessions = new Map();
+
+// ==================== TELEGRAM HELPERS ====================
 
 async function telegram(method, data = {}) {
   const response = await fetch(`${TELEGRAM_API}/${method}`, {
@@ -53,26 +60,21 @@ async function answerCallback(callbackId, text = "") {
       text
     });
   } catch (error) {
-    console.error("Callback response error:", error.message);
+    console.error("Callback error:", error.message);
   }
 }
+
+// ==================== MENUS ====================
 
 function mainMenu() {
   return {
     inline_keyboard: [
-      [
-        {
-          text: "🎁 Spin the Wheel",
-          web_app: { url: WHEEL_URL }
-        }
-      ],
+      [{ text: "🎁 Spin the Wheel", web_app: { url: WHEEL_URL } }],
       [
         { text: "🔎 Browse Products", callback_data: "browse" },
         { text: "📩 Contact Us", callback_data: "contact" }
       ],
-      [
-        { text: "ℹ️ About Us", callback_data: "about" }
-      ]
+      [{ text: "ℹ️ About Us", callback_data: "about" }]
     ]
   };
 }
@@ -80,11 +82,12 @@ function mainMenu() {
 function welcomeMessage() {
   return (
     `Welcome to ${BOT_NAME}! 👋\n\n` +
-    "Explore our public product catalogue, search by product name " +
-    "or brand, and request a quotation.\n\n" +
-    "Choose an option below to get started."
+    "Search our public product catalogue and request a quotation.\n\n" +
+    "You can search by product name, strength, salt/content or brand."
   );
 }
+
+// ==================== PUBLIC CATALOGUE ====================
 
 async function getCatalogue() {
   const response = await fetch(CATALOGUE_FEED_URL, {
@@ -106,27 +109,84 @@ async function getCatalogue() {
 
 function normalize(value) {
   return String(value || "")
+    .normalize("NFKD")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
 
+// Rank results by how well the search matches.
+// Missing fields never disqualify a product.
 function searchMatches(products, query) {
   const terms = normalize(query).split(/\s+/).filter(Boolean);
 
   if (!terms.length) return [];
 
-  return products.filter(product => {
-    const searchable = normalize([
-      product.product,
-      product.salt,
-      product.brand,
-      product.packing,
-      product.category
-    ].join(" "));
+  const scored = products.map((product, index) => {
+    const name = normalize(product.product);
+    const salt = normalize(product.salt);
+    const brand = normalize(product.brand);
+    const packing = normalize(product.packing);
+    const category = normalize(product.category);
 
-    return terms.every(term => searchable.includes(term));
+    const fields = [name, salt, brand, packing, category]
+      .filter(Boolean);
+
+    const combined = fields.join(" ");
+    let matchedTerms = 0;
+    let score = 0;
+
+    for (const term of terms) {
+      if (name.includes(term)) {
+        score += 10;
+        matchedTerms++;
+      } else if (salt.includes(term)) {
+        score += 7;
+        matchedTerms++;
+      } else if (brand.includes(term)) {
+        score += 6;
+        matchedTerms++;
+      } else if (packing.includes(term) || category.includes(term)) {
+        score += 2;
+        matchedTerms++;
+      } else if (combined.includes(term)) {
+        score += 1;
+        matchedTerms++;
+      }
+    }
+
+    // Prefer products matching all search terms.
+    const coverage = matchedTerms / terms.length;
+    score += coverage * 5;
+
+    if (name === normalize(query)) score += 30;
+
+    return { product, score, coverage, index };
   });
+
+  // First show strong matches, then partial matches if needed.
+  const exactCandidates = scored
+    .filter(item => item.coverage === 1 && item.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  const partialCandidates = scored
+    .filter(item => item.coverage > 0 && item.coverage < 1)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  const results = exactCandidates.length
+    ? exactCandidates.concat(partialCandidates)
+    : partialCandidates.length
+      ? partialCandidates
+      : scored
+          .filter(item => item.score > 0)
+          .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  return results.map(item => item.product);
+}
+
+function display(value, fallback = "Not specified") {
+  const text = String(value ?? "").trim();
+  return text || fallback;
 }
 
 function parsePrice(priceText) {
@@ -134,29 +194,35 @@ function parsePrice(priceText) {
     .replace(/,/g, "")
     .replace(/[^0-9.]/g, "");
 
+  if (!cleaned) return null;
+
   const price = Number(cleaned);
-  return Number.isFinite(price) && price > 0 ? price : null;
+  return Number.isFinite(price) && price >= 0 ? price : null;
 }
 
-function formatMoney(amount) {
+function money(amount) {
   return "$" + amount.toFixed(2);
 }
 
+// ==================== PRODUCT SEARCH ====================
+
 async function searchProducts(chatId, query) {
-  await sendMessage(chatId, "🔎 Searching your live public catalogue...");
+  await sendMessage(chatId, "🔎 Searching all public catalogue categories...");
 
   try {
-    const products = await getCatalogue();
-    const matches = searchMatches(products, query).slice(0, 10);
+    const catalogue = await getCatalogue();
+    const matches = searchMatches(catalogue, query).slice(0, 10);
 
     if (!matches.length) {
       await sendMessage(
         chatId,
-        `No matching products found for: ${query}\n\n` +
-        "Try the product name, brand name, or strength. " +
-        "You can also contact us for assistance.",
+        "I couldn't find an exact match for that search.\n\n" +
+        "Try a shorter product name, brand or strength. " +
+        "If the product is listed under a different name, contact us " +
+        "for manual assistance.",
         {
           inline_keyboard: [
+            [{ text: "🔎 Search Again", callback_data: "browse" }],
             [{ text: "📩 Contact Us", callback_data: "contact" }],
             [{ text: "🏠 Main Menu", callback_data: "home" }]
           ]
@@ -172,47 +238,48 @@ async function searchProducts(chatId, query) {
 
     await sendMessage(
       chatId,
-      `Found ${matches.length} matching product(s).\n\n` +
-      "Select a product below to view its details and request a quotation."
+      `Found ${matches.length} possible match(es) for "${query}".\n\n` +
+      "Select Request Quotation for the product you need."
     );
 
     for (let i = 0; i < matches.length; i++) {
-      const product = matches[i];
-      const price = parsePrice(product.priceText);
+      const p = matches[i];
+      const price = parsePrice(p.priceText);
 
       const details = [
-        `📦 ${product.product}`,
-        product.salt ? `Content: ${product.salt}` : null,
-        product.brand ? `Brand: ${product.brand}` : null,
-        product.packing ? `Packing: ${product.packing}` : null,
-        `Category: ${product.category}`,
-        price !== null
-          ? `Catalogue price: ${formatMoney(price)} per listed packing unit`
-          : `Catalogue price: ${product.priceText || "Please enquire"}`
-      ].filter(Boolean).join("\n");
+        `📦 ${display(p.product)}`,
+        `Content: ${display(p.salt)}`,
+        `Brand: ${display(p.brand)}`,
+        `Packing: ${display(p.packing)}`,
+        `Category: ${display(p.category)}`,
+        `Catalogue price: ${
+          price === null
+            ? "Price to be confirmed"
+            : money(price) + " per listed packing unit"
+        }`
+      ].join("\n");
 
       await sendMessage(chatId, details, {
-        inline_keyboard: [
-          [{
-            text: "🧾 Request Quotation",
-            callback_data: `quote:${i}`
-          }]
-        ]
+        inline_keyboard: [[{
+          text: "🧾 Request Quotation",
+          callback_data: `quote:${i}`
+        }]]
       });
     }
 
-    await sendMessage(chatId, "What would you like to do next?", mainMenu());
+    await sendMessage(chatId, "Choose your next action:", mainMenu());
   } catch (error) {
-    console.error("Catalogue search error:", error.message);
+    console.error("Catalogue search failed:", error.message);
 
     await sendMessage(
       chatId,
-      "Sorry, I couldn't access the catalogue right now. " +
-      "Please try again shortly or contact " + CONTACT_EMAIL + ".",
+      "The catalogue is temporarily unavailable. Please try again shortly.",
       mainMenu()
     );
   }
 }
+
+// ==================== QUOTATION FLOW ====================
 
 async function startQuotation(chatId, index) {
   const session = sessions.get(chatId);
@@ -221,25 +288,29 @@ async function startQuotation(chatId, index) {
   if (!product) {
     await sendMessage(
       chatId,
-      "That product selection has expired. Please search again.",
+      "This selection has expired. Please search for the product again.",
       mainMenu()
     );
     return;
   }
 
   session.selectedProduct = product;
-  session.stage = "quantity";
   session.quantity = null;
   session.country = null;
+  session.stage = "quantity";
   sessions.set(chatId, session);
 
   await sendMessage(
     chatId,
-    `🧾 Quotation Request\n\n` +
-    `Product: ${product.product}\n` +
-    `Packing: ${product.packing || "As listed"}\n` +
-    `Catalogue price: ${product.priceText || "Please enquire"}\n\n` +
-    "Enter the quantity of listed packing units you require.\n\n" +
+    "🧾 QUOTATION REQUEST\n\n" +
+    `Product: ${display(product.product)}\n` +
+    `Packing: ${display(product.packing)}\n` +
+    `Catalogue price: ${
+      parsePrice(product.priceText) === null
+        ? "Price to be confirmed"
+        : money(parsePrice(product.priceText))
+    }\n\n` +
+    "Enter the quantity of listed packing units you require.\n" +
     "Example: 10"
   );
 }
@@ -247,15 +318,15 @@ async function startQuotation(chatId, index) {
 async function handleQuotationMessage(chatId, text) {
   const session = sessions.get(chatId);
 
-  if (!session || !session.stage) return false;
+  if (!session?.stage) return false;
 
   if (session.stage === "quantity") {
-    const quantity = Number(String(text).trim());
+    const quantity = Number(text.trim());
 
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000000) {
+    if (!Number.isSafeInteger(quantity) || quantity < 1) {
       await sendMessage(
         chatId,
-        "Please enter a valid whole-number quantity, such as 10."
+        "Enter a valid whole-number quantity, such as 10."
       );
       return true;
     }
@@ -266,51 +337,27 @@ async function handleQuotationMessage(chatId, text) {
 
     await sendMessage(
       chatId,
-      "🌍 Which country should the order be shipped to?\n\n" +
-      "Enter the destination country."
+      "🌍 Enter the destination country for this order."
     );
     return true;
   }
 
   if (session.stage === "country") {
-    const country = String(text).trim();
+    const country = text.trim();
 
     if (country.length < 2 || country.length > 100) {
-      await sendMessage(chatId, "Please enter a valid destination country.");
+      await sendMessage(chatId, "Please enter a valid country name.");
       return true;
     }
 
     session.country = country;
     session.stage = "confirm";
+    session.quoteSummary = buildQuoteSummary(session);
     sessions.set(chatId, session);
 
-    const product = session.selectedProduct;
-    const unitPrice = parsePrice(product.priceText);
-    const total = unitPrice !== null
-      ? formatMoney(unitPrice * session.quantity)
-      : "To be confirmed";
-
-    const summary =
-      "🧾 YOUR QUOTATION REQUEST\n\n" +
-      `Product: ${product.product}\n` +
-      `Content: ${product.salt || "As listed"}\n` +
-      `Brand: ${product.brand || "As listed"}\n` +
-      `Packing per unit: ${product.packing || "As listed"}\n` +
-      `Quantity: ${session.quantity} packing unit(s)\n` +
-      `Destination: ${country}\n` +
-      `Catalogue unit price: ${product.priceText || "To be confirmed"}\n` +
-      `Estimated product subtotal: ${total}\n\n` +
-      "This is an estimate based on the listed catalogue price. " +
-      "Shipping, applicable taxes, export eligibility, availability, " +
-      "and other charges are not included. Final pricing and shipment " +
-      "are subject to confirmation and applicable laws.";
-
-    session.quoteSummary = summary;
-    sessions.set(chatId, session);
-
-    await sendMessage(chatId, summary, {
+    await sendMessage(chatId, session.quoteSummary, {
       inline_keyboard: [
-        [{ text: "✅ Submit Request", callback_data: "submit_quote" }],
+        [{ text: "✅ Submit Quotation Request", callback_data: "submit_quote" }],
         [{ text: "❌ Cancel", callback_data: "cancel_quote" }]
       ]
     });
@@ -321,12 +368,90 @@ async function handleQuotationMessage(chatId, text) {
   return false;
 }
 
+function buildQuoteSummary(session) {
+  const p = session.selectedProduct;
+  const unitPrice = parsePrice(p.priceText);
+  const subtotal = unitPrice === null
+    ? "Price to be confirmed"
+    : money(unitPrice * session.quantity);
+
+  return (
+    "🧾 QUOTATION SUMMARY\n\n" +
+    `Product: ${display(p.product)}\n` +
+    `Strength/content: ${display(p.salt)}\n` +
+    `Brand: ${display(p.brand)}\n` +
+    `Packing: ${display(p.packing)}\n` +
+    `Quantity: ${session.quantity} listed packing unit(s)\n` +
+    `Destination: ${session.country}\n` +
+    `Unit price: ${
+      unitPrice === null
+        ? "To be confirmed"
+        : money(unitPrice)
+    }\n` +
+    `Estimated product subtotal: ${subtotal}\n\n` +
+    "Shipping, taxes, availability and any missing catalogue details " +
+    "must be confirmed before a final quotation can be issued."
+  );
+}
+
+async function submitQuotation(chatId) {
+  const session = sessions.get(chatId);
+
+  if (!session?.quoteSummary || !session.selectedProduct) {
+    await sendMessage(
+      chatId,
+      "Your quotation request has expired. Please search again.",
+      mainMenu()
+    );
+    return;
+  }
+
+  // Notify the customer that their request was submitted.
+  // Configure ADMIN_CHAT_ID in Render to also send the request to your team.
+  if (ADMIN_CHAT_ID) {
+    try {
+      await sendMessage(
+        ADMIN_CHAT_ID,
+        "📥 NEW QUOTATION REQUEST\n\n" +
+        session.quoteSummary +
+        `\n\nCustomer Telegram ID: ${chatId}`
+      );
+    } catch (error) {
+      console.error("Admin notification failed:", error.message);
+
+      await sendMessage(
+        chatId,
+        "We couldn't forward the request automatically. Please contact " +
+        CONTACT_EMAIL + " to complete your enquiry.",
+        mainMenu()
+      );
+      return;
+    }
+  }
+
+  session.stage = null;
+  sessions.set(chatId, session);
+
+  await sendMessage(
+    chatId,
+    ADMIN_CHAT_ID
+      ? "✅ Your quotation request has been submitted successfully. " +
+        "Our team can review your requirements and confirm the final price."
+      : "✅ Your quotation summary is ready.\n\n" +
+        "Automatic forwarding to the sales team is not configured yet. " +
+        "Please send this request to " + CONTACT_EMAIL +
+        " to obtain a confirmed quotation.",
+    mainMenu()
+  );
+}
+
+// ==================== BUTTON HANDLERS ====================
+
 async function handleCallback(callback) {
   const chatId = callback.message?.chat?.id;
   const data = callback.data || "";
 
   await answerCallback(callback.id);
-
   if (!chatId) return;
 
   if (data === "home") {
@@ -343,8 +468,8 @@ async function handleCallback(callback) {
 
     await sendMessage(
       chatId,
-      "🔎 Enter the product name, brand, or strength you want to find.\n\n" +
-      "Example: EXTRA SUPER AVANA"
+      "🔎 Type a product name, strength, salt/content or brand.\n\n" +
+      "Example: ALFUZOSIN HYDROCHLORIDE"
     );
     return;
   }
@@ -352,10 +477,7 @@ async function handleCallback(callback) {
   if (data === "contact") {
     await sendMessage(
       chatId,
-      "📩 Contact Us\n\n" +
-      "Bridge Point Traders\n" +
-      `Email: ${CONTACT_EMAIL}\n\n` +
-      "Send us your product requirements for assistance.",
+      `📩 Contact Us\n\nEmail: ${CONTACT_EMAIL}`,
       mainMenu()
     );
     return;
@@ -364,51 +486,26 @@ async function handleCallback(callback) {
   if (data === "about") {
     await sendMessage(
       chatId,
-      "ℹ️ About Us\n\n" +
-      "Bridge Point Traders is a pharmaceutical trading and export business " +
-      "based in India. Product availability, export eligibility, and " +
-      "shipping depend on the destination country's applicable requirements.\n\n" +
-      `Contact: ${CONTACT_EMAIL}`,
+      `${BOT_NAME}\n\n` +
+      "Search the public catalogue and submit product quotation requests.",
       mainMenu()
     );
     return;
   }
 
   if (data.startsWith("quote:")) {
-    const index = Number(data.split(":")[1]);
+    const index = Number(data.slice("quote:".length));
 
-    if (!Number.isInteger(index) || index < 0) {
-      await sendMessage(chatId, "Invalid selection. Please search again.");
-      return;
+    if (Number.isInteger(index) && index >= 0) {
+      await startQuotation(chatId, index);
+    } else {
+      await sendMessage(chatId, "Invalid product selection. Search again.");
     }
-
-    await startQuotation(chatId, index);
     return;
   }
 
   if (data === "submit_quote") {
-    const session = sessions.get(chatId);
-
-    if (!session?.quoteSummary || !session.selectedProduct) {
-      await sendMessage(
-        chatId,
-        "Your quotation request has expired. Please search again.",
-        mainMenu()
-      );
-      return;
-    }
-
-    session.stage = null;
-    sessions.set(chatId, session);
-
-    await sendMessage(
-      chatId,
-      "✅ Your quotation request has been recorded in this chat.\n\n" +
-      "To obtain a confirmed quotation, email your requirements to " +
-      `${CONTACT_EMAIL}.\n\n` +
-      "Please include your destination country and any additional requirements.",
-      mainMenu()
-    );
+    await submitQuotation(chatId);
     return;
   }
 
@@ -419,6 +516,8 @@ async function handleCallback(callback) {
     await sendMessage(chatId, "Quotation request cancelled.", mainMenu());
   }
 }
+
+// ==================== MESSAGE HANDLER ====================
 
 async function handleMessage(message) {
   if (!message?.chat?.id || !message.text) return;
@@ -435,9 +534,7 @@ async function handleMessage(message) {
   if (text === "/help") {
     await sendMessage(
       chatId,
-      "Use /start to open the menu.\n" +
-      "Use Browse Products to search the public catalogue.\n" +
-      "You can also type a product name directly.",
+      "Use /start to open the menu, or type a product name to search.",
       mainMenu()
     );
     return;
@@ -446,8 +543,7 @@ async function handleMessage(message) {
   const session = sessions.get(chatId);
 
   if (session?.stage === "quantity" || session?.stage === "country") {
-    const handled = await handleQuotationMessage(chatId, text);
-    if (handled) return;
+    if (await handleQuotationMessage(chatId, text)) return;
   }
 
   if (session?.stage === "search") {
@@ -462,19 +558,22 @@ async function handleMessage(message) {
     return;
   }
 
+  // Direct product search from any normal message.
   await searchProducts(chatId, text);
 }
 
-const server = http.createServer(async (req, res) => {
+// ==================== HTTP SERVER ====================
+
+const server = http.createServer((req, res) => {
   if (req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end(`${BOT_NAME} is running.`);
     return;
   }
 
-  if (req.method !== "POST") {
-    res.writeHead(405);
-    res.end("Method not allowed");
+  if (req.method !== "POST" || req.url !== "/") {
+    res.writeHead(404);
+    res.end("Not found");
     return;
   }
 
@@ -485,27 +584,30 @@ const server = http.createServer(async (req, res) => {
     if (body.length > 1_000_000) req.destroy();
   });
 
-  req.on("end", async () => {
+  req.on("end", () => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+
+    let update;
+
     try {
-      const update = JSON.parse(body || "{}");
-
-      // Respond to Telegram promptly; process the update afterward.
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("OK");
-
-      if (update.callback_query) {
-        await handleCallback(update.callback_query);
-      } else if (update.message) {
-        await handleMessage(update.message);
-      }
+      update = JSON.parse(body || "{}");
     } catch (error) {
-      console.error("Webhook processing error:", error.message);
-
-      if (!res.writableEnded) {
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        res.end("OK");
-      }
+      console.error("Invalid webhook JSON:", error.message);
+      return;
     }
+
+    Promise.resolve()
+      .then(async () => {
+        if (update.callback_query) {
+          await handleCallback(update.callback_query);
+        } else if (update.message) {
+          await handleMessage(update.message);
+        }
+      })
+      .catch(error => {
+        console.error("Update handling error:", error.message);
+      });
   });
 });
 
