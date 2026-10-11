@@ -198,16 +198,39 @@ async function handleUpdate(update) {
       return;
     }
 
-    if (callback.data === "about") {
-      await sendMessage(
-        chatId,
-        "ℹ️ One Stop Wellness Hub\n\n" +
-        "Explore our public product catalogue, search products " +
-        "and contact our team for enquiries.",
-        mainMenu
-      );
-      return;
+   
+if (callback.data === "about") {
+  await sendMessage(
+    chatId,
+    "ℹ️ About One Stop Wellness Hub\n\n" +
+      "Welcome to One Stop Wellness Hub, powered by Bridge Point Traders.\n\n" +
+      "Explore our pharmaceutical catalogue, learn about our packing process, and connect with our team for product enquiries and support.",
+    {
+      inline_keyboard: [
+     [
+  {
+    text: "📦 Packing Video",
+    url: "https://drive.google.com/file/d/1NV0LL7gBCUriTiSsPb6nD04otgQ0due/view?usp=sharing"
+  }
+],
+[
+  {
+    text: "🏬 Store Tour",
+    url: "https://drive.google.com/file/d/1Ff3IgHrcc-QUS8RUMBa6N_5SXu4PmgaJ/view?usp=sharing"
+  }
+],
+        [
+          {
+            text: "🏠 Main Menu",
+            callback_data: "home"
+          }
+        ]
+      ]
     }
+  );
+  return;
+}
+
 
     if (callback.data === "home") {
       await sendMessage(
