@@ -177,13 +177,13 @@ async function handleUpdate(update) {
     if (callback.data === "contact") {
       await sendMessage(
         chatId,
-        `📩 Contact Us\n\nEmail: ${CONTACT_EMAIL}`,
+                `📩 Contact Us\n\nContact us directly on Telegram: @gangasobti`,
         {
           inline_keyboard: [
             [
               {
-                text: "✉️ Email Us",
-                url: `mailto:${CONTACT_EMAIL}`
+                text: "📩 Message Us on Telegram",
+                url: "https://t.me/gangasobti"
               }
             ],
             [
@@ -193,7 +193,7 @@ async function handleUpdate(update) {
               }
             ]
           ]
-        }
+               }
       );
       return;
     }
