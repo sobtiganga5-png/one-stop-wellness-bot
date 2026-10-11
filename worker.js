@@ -68,6 +68,7 @@ function getSession(chatId) {
   return sessions.get(chatId);
 }
 
+
 function priceInUSD(product) {
   const raw = String(product.priceText || "").trim();
 
@@ -75,13 +76,18 @@ function priceInUSD(product) {
     return null;
   }
 
-  // Catalogue prices are expected to be in USD per strip.
-  const match = raw.replace(/,/g, "").match(/(?:USD|\$)?\s*(\d+(?:\.\d+)?)/i);
+  const match = raw.replace(/,/g, "").match(
+    /(?:USD\s*|\$\s*)(\d+(?:\.\d+)?)/i
+  );
+
   if (!match) return null;
 
   const price = Number(match[1]);
   return Number.isFinite(price) && price > 0 ? price : null;
 }
+
+  
+
 
 function productName(product) {
   return [product.product, product.brand]
