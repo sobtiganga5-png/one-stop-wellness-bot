@@ -56,7 +56,8 @@ const mainMenu = {
   ]
 };
 
-// Temporary sessions; use persistent storage for production reliability.
+// Temporary sessions. These reset if the Worker restarts.
+// Use persistent storage for production reliability.
 const sessions = new Map();
 const searchResults = new Map();
 
@@ -100,12 +101,14 @@ function priceInUSD(product) {
     return null;
   }
 
-  const match = raw.replace(/,/g, "")
+  const match = raw
+    .replace(/,/g, "")
     .match(/(?:USD\s*|\$\s*)(\d+(?:\.\d+)?)/i);
 
   if (!match) return null;
 
   const value = Number(match[1]);
+
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
@@ -116,15 +119,22 @@ function subtotalOf(session) {
   );
 }
 
-// Shipping estimates used consistently in customer and admin quotations.
+// Shipping rates are consistent across the destination menu,
+// customer quotation and admin quotation request.
 function shippingForCountry(country) {
-  if (country === "USA") return 70;
+  const rates = {
+    USA: 70,
+    UK: 35,
+    AUSTRALIA: 50,
+    SOUTH_AFRICA: 50,
+    JAPAN: 40,
+    SOUTH_KOREA: 25,
+    HONG_KONG: 35,
+    PHILIPPINES: 35,
+    OTHER: 50
+  };
 
-  if (country === "AUSTRALIA" || country === "OTHER") {
-    return 50;
-  }
-
-  return 35;
+  return rates[country] ?? 50;
 }
 
 function destinationName(country) {
@@ -174,7 +184,9 @@ async function sendMessage(env, chatId, text, keyboard, threadId) {
     text: String(text).slice(0, 4000)
   };
 
-  if (keyboard) payload.reply_markup = keyboard;
+  if (keyboard) {
+    payload.reply_markup = keyboard;
+  }
 
   if (threadId !== undefined && threadId !== null) {
     payload.message_thread_id = threadId;
@@ -235,35 +247,37 @@ async function searchProducts(env, chatId, query) {
     const products = data.products.slice(0, 10);
     searchResults.set(String(chatId), products);
 
-    const lines = products.map((p, i) => {
-      const price = priceInUSD(p);
+    const lines = products.map((product, i) => {
+      const price = priceInUSD(product);
 
       return [
-        `${i + 1}. ${productName(p)}`,
-        p.salt ? `Salt: ${p.salt}` : "",
-        p.packing ? `Packing: ${p.packing}` : "",
-        p.category ? `Category: ${p.category}` : "",
+        `${i + 1}. ${productName(product)}`,
+        product.salt ? `Salt: ${product.salt}` : "",
+        product.packing ? `Packing: ${product.packing}` : "",
+        product.category ? `Category: ${product.category}` : "",
         price === null
           ? "Price: Please contact us"
           : `Price per unit: $${money(price)}`
       ].filter(Boolean).join("\n");
     });
 
-    // One button instead of a separate button for every product.
-    const keyboard = [
-      [{ text: "➕ Add to Quotation", callback_data: "add_to_quote" }],
-      [{ text: "🧾 View Quote Cart", callback_data: "cart" }],
-      [{ text: "🔎 Search Another Product", callback_data: "more" }],
-      [{ text: "🏠 Main Menu", callback_data: "home" }]
-    ];
+    // ONLY ONE BUTTON appears below the search results.
+    const keyboard = {
+      inline_keyboard: [
+        [{
+          text: "➕ Add to Quotation",
+          callback_data: "add_to_quote"
+        }]
+      ]
+    };
 
     await sendMessage(
       env,
       chatId,
       `🔎 Results for "${safe(query)}"\n\n` +
         `${lines.join("\n\n")}\n\n` +
-        `Tap "Add to Quotation" and enter the product number you want to add.`,
-      { inline_keyboard: keyboard }
+        `Tap "Add to Quotation", then enter the product number and quantity.`,
+      keyboard
     );
   } catch (error) {
     console.error("Product search error:", error.message);
@@ -370,11 +384,9 @@ async function submitOrder(env, chatId, from) {
 
   try {
     const subtotal = subtotalOf(session);
-
     const shipping = session.country
       ? shippingForCountry(session.country)
       : null;
-
     const total = shipping === null ? null : subtotal + shipping;
 
     const customerName = [
@@ -450,15 +462,15 @@ async function showPayments(env, chatId) {
 }
 
 async function showBankDetails(env, chatId) {
-  const details = BANKS.map((b) =>
-    `${b.name}\n` +
+  const details = BANKS.map((bank) =>
+    `${bank.name}\n` +
     `Beneficiary: ${BENEFICIARY}\n` +
-    `Account type: ${b.type}\n` +
-    `Account number: ${env[b.accountEnv] || "Please request verified details from Ganga"}\n` +
-    `IFSC: ${env[b.ifscEnv] || b.defaultIfsc}\n` +
-    `SWIFT: ${env[b.swiftEnv] || b.defaultSwift}\n` +
-    `Branch code: ${b.branchCode}\n` +
-    `Branch: ${b.address}`
+    `Account type: ${bank.type}\n` +
+    `Account number: ${env[bank.accountEnv] || "Please request verified details from Ganga"}\n` +
+    `IFSC: ${env[bank.ifscEnv] || bank.defaultIfsc}\n` +
+    `SWIFT: ${env[bank.swiftEnv] || bank.defaultSwift}\n` +
+    `Branch code: ${bank.branchCode}\n` +
+    `Branch: ${bank.address}`
   ).join("\n\n──────────────\n\n");
 
   await sendMessage(
@@ -491,7 +503,6 @@ async function handleCallback(env, callback) {
 
   if (data === "home") {
     session.stage = "";
-
     await sendMessage(
       env,
       chatId,
@@ -502,15 +513,12 @@ async function handleCallback(env, callback) {
   }
 
   if (data === "search" || data === "more") {
-    session.stage = "";
-
+    session.stage = "search";
     await sendMessage(
       env,
       chatId,
       "🔎 Type the product name you want to search for."
     );
-
-    session.stage = "search";
     return;
   }
 
@@ -657,7 +665,7 @@ async function handleCallback(env, callback) {
 
 // WHEEL CLAIMS TO ADMIN TOPIC 6
 async function handleWheelClaim(env, chatId, payload, from) {
-  // Reject retired free-shipping claims.
+  // Retired free-shipping claims are rejected.
   if (payload.startsWith("claim_freeshipping_")) {
     await sendMessage(
       env,
@@ -745,20 +753,19 @@ async function handleMessage(env, message) {
     return;
   }
 
-  // Handle the product number after Add to Quotation.
+  // Handle the selected product number.
   if (session.stage === "product_index") {
     const products = searchResults.get(String(chatId)) || [];
     const index = Number(text);
 
-    if (
-      !/^\d+$/.test(text) ||
-      index < 1 ||
-      index > products.length
-    ) {
+    if (!/^\d+$/.test(text) || index < 1 || index > products.length) {
       await sendMessage(
         env,
         chatId,
-        `Please enter a valid product number from 1 to ${products.length}.`
+        products.length
+          ? `Please enter a valid product number from 1 to ${products.length}.`
+          : "Your search results have expired. Please search again.",
+        products.length ? undefined : mainMenu
       );
       return;
     }
@@ -806,14 +813,13 @@ async function handleMessage(env, message) {
       await sendMessage(
         env,
         chatId,
-        "Please enter a whole-number quantity greater than zero."
+        "Please enter a whole-number quantity from 1 to 10000."
       );
       return;
     }
 
     if (!session.pendingProduct) {
       session.stage = "";
-
       await sendMessage(
         env,
         chatId,
@@ -879,10 +885,7 @@ export default {
       });
     }
 
-    if (
-      request.method !== "POST" ||
-      url.pathname !== "/telegram"
-    ) {
+    if (request.method !== "POST" || url.pathname !== "/telegram") {
       return new Response("Not found", { status: 404 });
     }
 
