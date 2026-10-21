@@ -56,8 +56,7 @@ const mainMenu = {
   ]
 };
 
-// Temporary session storage. Sessions reset when the Worker restarts.
-// Use persistent storage for production reliability.
+// Temporary sessions; use persistent storage for production reliability.
 const sessions = new Map();
 const searchResults = new Map();
 
@@ -107,7 +106,6 @@ function priceInUSD(product) {
   if (!match) return null;
 
   const value = Number(match[1]);
-
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
@@ -116,6 +114,33 @@ function subtotalOf(session) {
     (sum, item) => sum + item.price * item.quantity,
     0
   );
+}
+
+// Shipping estimates used consistently in customer and admin quotations.
+function shippingForCountry(country) {
+  if (country === "USA") return 70;
+
+  if (country === "AUSTRALIA" || country === "OTHER") {
+    return 50;
+  }
+
+  return 35;
+}
+
+function destinationName(country) {
+  const destinations = {
+    USA: "USA",
+    UK: "United Kingdom",
+    AUSTRALIA: "Australia",
+    SOUTH_AFRICA: "South Africa",
+    JAPAN: "Japan",
+    SOUTH_KOREA: "South Korea",
+    HONG_KONG: "Hong Kong",
+    PHILIPPINES: "Philippines",
+    OTHER: "Other Country"
+  };
+
+  return destinations[country] || "Other Country";
 }
 
 async function telegram(env, method, data) {
@@ -224,7 +249,7 @@ async function searchProducts(env, chatId, query) {
       ].filter(Boolean).join("\n");
     });
 
-    // ONE reusable Add to Quotation button.
+    // One button instead of a separate button for every product.
     const keyboard = [
       [{ text: "➕ Add to Quotation", callback_data: "add_to_quote" }],
       [{ text: "🧾 View Quote Cart", callback_data: "cart" }],
@@ -293,15 +318,10 @@ async function showCart(env, chatId) {
 }
 
 async function showFinalQuote(env, chatId, session, country) {
-  const shipping = country === "USA" ? 70 : 35;
+  const shipping = shippingForCountry(country);
   const subtotal = subtotalOf(session);
   const total = subtotal + shipping;
-
-  const destination = country === "USA"
-    ? "USA"
-    : country === "UK"
-      ? "United Kingdom"
-      : "Other country";
+  const destination = destinationName(country);
 
   const lines = session.cart.map((item, i) =>
     `${i + 1}. ${item.name}\n` +
@@ -352,7 +372,7 @@ async function submitOrder(env, chatId, from) {
     const subtotal = subtotalOf(session);
 
     const shipping = session.country
-      ? (session.country === "USA" ? 70 : 35)
+      ? shippingForCountry(session.country)
       : null;
 
     const total = shipping === null ? null : subtotal + shipping;
@@ -378,7 +398,7 @@ async function submitOrder(env, chatId, from) {
       `Subtotal: $${money(subtotal)}\n` +
       (shipping === null
         ? "Shipping: Not selected\nTotal: To be confirmed\n"
-        : `Destination: ${session.country}\n` +
+        : `Destination: ${destinationName(session.country)}\n` +
           `Shipping estimate: $${money(shipping)}\n` +
           `Estimated total: $${money(total)}\n`) +
       `\nPlease review stock, destination, shipping, price and import requirements before confirming.`;
@@ -482,13 +502,15 @@ async function handleCallback(env, callback) {
   }
 
   if (data === "search" || data === "more") {
-    session.stage = "search";
+    session.stage = "";
 
     await sendMessage(
       env,
       chatId,
       "🔎 Type the product name you want to search for."
     );
+
+    session.stage = "search";
     return;
   }
 
@@ -497,7 +519,7 @@ async function handleCallback(env, callback) {
     return;
   }
 
-  // ONE BUTTON: ask which numbered search result to add.
+  // Single Add to Quotation button.
   if (data === "add_to_quote") {
     const products = searchResults.get(String(chatId)) || [];
 
@@ -530,12 +552,18 @@ async function handleCallback(env, callback) {
     await sendMessage(
       env,
       chatId,
-      "Choose the destination for the shipping estimate:",
+      "🌍 Select your shipping destination:",
       {
         inline_keyboard: [
           [{ text: "🇺🇸 USA — $70 estimate", callback_data: "country:USA" }],
-          [{ text: "🇬🇧 UK — $35 estimate", callback_data: "country:UK" }],
-          [{ text: "🌍 Other — $35 estimate", callback_data: "country:OTHER" }],
+          [{ text: "🇬🇧 United Kingdom — $35 estimate", callback_data: "country:UK" }],
+          [{ text: "🇦🇺 Australia — $50 estimate", callback_data: "country:AUSTRALIA" }],
+          [{ text: "🇿🇦 South Africa — $50 estimate", callback_data: "country:SOUTH_AFRICA" }],
+          [{ text: "🇯🇵 Japan — $40 estimate", callback_data: "country:JAPAN" }],
+          [{ text: "🇰🇷 South Korea — $25 estimate", callback_data: "country:SOUTH_KOREA" }],
+          [{ text: "🇭🇰 Hong Kong — $35 estimate", callback_data: "country:HONG_KONG" }],
+          [{ text: "🇵🇭 Philippines — $35 estimate", callback_data: "country:PHILIPPINES" }],
+          [{ text: "🌍 Other Country — $50 estimate", callback_data: "country:OTHER" }],
           [{ text: "🏠 Main Menu", callback_data: "home" }]
         ]
       }
@@ -629,7 +657,7 @@ async function handleCallback(env, callback) {
 
 // WHEEL CLAIMS TO ADMIN TOPIC 6
 async function handleWheelClaim(env, chatId, payload, from) {
-  // Reject the retired free-shipping claim code.
+  // Reject retired free-shipping claims.
   if (payload.startsWith("claim_freeshipping_")) {
     await sendMessage(
       env,
@@ -717,7 +745,7 @@ async function handleMessage(env, message) {
     return;
   }
 
-  // Handle the product number entered after Add to Quotation.
+  // Handle the product number after Add to Quotation.
   if (session.stage === "product_index") {
     const products = searchResults.get(String(chatId)) || [];
     const index = Number(text);
